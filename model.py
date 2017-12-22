@@ -32,15 +32,11 @@ def gmul(input):
     output = torch.cat(output, 2) # output has size (bs, N, J*num_features)
     return output
 
-def bnorm(x, Ns, mask):
-    # mean:
-    mx = x.sum(1)
-    mx = (mx / Ns.unsqueeze(1).expand_as(mx)).unsqueeze(1).expand_as(x) * mask
-    # variance:
-    subs = x - mx
+def bnorm(x, U):
+    mx = torch.bmm(U,x)
+    subs = x-mx
     subs2 = subs*subs
-    vx = subs2.sum(1)
-    vx = (vx / Ns.unsqueeze(1).expand_as(vx)).unsqueeze(1).expand_as(x)
+    vx = torch.bmm(U,subs2)
     out = subs / (vx.clamp(min=1e-10).sqrt() + 1e-5)
     return out
 
@@ -52,22 +48,22 @@ class Gconv(nn.Module):
         self.last = last
         self.fc1 = nn.Linear(self.num_inputs, self.num_outputs // 2).type(dtype)
         self.fc2 = nn.Linear(self.num_inputs, self.num_outputs // 2).type(dtype)
-        self.beta = nn.Linear(feature_maps[0], 1).type(dtype)
-        self.sigma = nn.Parameter(torch.FloatTensor([random.uniform(0.0,1.0)]).type(dtype))
+        self.beta = nn.Linear(feature_maps[0], feature_maps[0], bias=False).type(dtype)
         self.gamma = nn.Parameter(torch.ones(self.num_outputs).type(dtype))
 
     def forward(self, input):
         W, x, Y = input
         N = Y.size(-1)
         bs = Y.size(0)
-        mask = (W[:,:,:,W.size(-1)-1] > 0).data
-        Ns = Variable(mask[:,:,0].float().sum(1).clamp(min=1))
-        mask = Variable(mask.float())
-        bx = self.beta(x) # has size (bs,N,1)
-        Bx = bx.expand(bs,N,N) # has size (bs,N,N) by repeating columns
-        Y = F.sigmoid(Bx + Bx.permute(0,2,1) + self.sigma*(Y-0.5))
-        Y = Y * (1-Variable(torch.eye(N).type(dtype)).unsqueeze(0).expand(bs,N,N))
-        Y = Y * mask
+        mask1 = Variable((W.data[:,:,:,-1] > 0).float())
+        mask2 = Variable(W.data[:,:,:,0].float().sum(2))
+        U = Variable(W.data[:,:,:,-1])
+        Ns = Variable(W.data[:,:,:,0].float().sum(2).sum(1).clamp(min=1))
+        xB = self.beta(x) * mask2.unsqueeze(2).expand_as(x) # has size (bs,N,R)
+        Y = torch.bmm(xB, x.permute(0,2,1)) - (1-mask1)*10000
+        Y = F.softmax(Y.permute(1,0,2)).permute(1,0,2)
+        #Y = (Y + Y.permute(0,2,1)) / 2
+        #Y = Y * mask1
         
         x = gmul((W, x, Y)) # out has size (bs, N, num_inputs)
         x_size = x.size()
@@ -76,14 +72,11 @@ class Gconv(nn.Module):
         if self.last:
             x1 = self.fc1(x)
         else:
-            x1 = F.relu(self.fc1(x)) # has size (bs*N, num_outputs // 2)
+            x1 = F.sigmoid(self.fc1(x)) # has size (bs*N, num_outputs // 2)
         x2 = self.fc2(x)
         x = torch.cat((x1, x2), 1)
         x = x.view(*x_size[:-1], self.num_outputs)
-        x = x * mask[:,:,0].unsqueeze(2).expand_as(x)
-        
-        #x = self.bn_instance(x.permute(0, 2, 1)).permute(0, 2, 1)
-        x = bnorm(x, Ns, mask[:,:,0].unsqueeze(2).expand_as(x))
+        x = bnorm(x, U)
         x = x * self.gamma.unsqueeze(0).unsqueeze(1).expand_as(x)
         
         return W, x, Y

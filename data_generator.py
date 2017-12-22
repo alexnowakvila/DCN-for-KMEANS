@@ -62,9 +62,18 @@ class Generator():
         target = target[rand_perm]
         return points, target
     
+    def uniform_example(self, N):
+        points = np.random.uniform(0, 1, 2*N)
+        points = np.reshape(points, (2, N))
+        target = np.zeros(N)
+        return points, target
+    
     def compute_example(self):
         example = {}
-        points, target = self.gaussian_example(self.N, self.clusters)
+        if self.clusters > 0:
+            points, target = self.gaussian_example(self.N, self.clusters)
+        else:
+            points, target = self.uniform_example(self.N)
         example['points'] = points
         example['target'] = target
         return example
