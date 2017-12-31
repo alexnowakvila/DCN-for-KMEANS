@@ -36,7 +36,7 @@ else:
     torch.manual_seed(0)
 
 class Generator():
-    def __init__(self, path_dataset, num_examples_train, num_examples_test, N, clusters):
+    def __init__(self, path_dataset, num_examples_train, num_examples_test, N, clusters, dim):
         self.path_dataset = path_dataset
         self.num_examples_train = num_examples_train
         self.num_examples_test = num_examples_test
@@ -44,19 +44,20 @@ class Generator():
         self.data_test = []
         self.N = N
         self.clusters = clusters
+        self.dim = dim
     
     
     def gaussian_example(self, N, clusters):
-        centers = np.random.uniform(0, 1, [clusters, 2])
+        centers = np.random.uniform(0, 1, [clusters, self.dim])
         per_cl = N // clusters
         Pts = []
-        cov = 0.001 * np.eye(2, 2)
+        cov = 0.001 * np.eye(self.dim, self.dim)
         target = np.zeros([N])
         for c in range(clusters):
             points = np.random.multivariate_normal(centers[c], cov, per_cl)
             target[c * per_cl: (c + 1) * per_cl] = c
             Pts.append(points)
-        points = np.reshape(Pts, [-1, 2])
+        points = np.reshape(Pts, [-1, self.dim])
         rand_perm = np.random.permutation(N)
         points = points[rand_perm]
         target = target[rand_perm]
@@ -97,7 +98,7 @@ class Generator():
 
     def load_dataset(self):
         # load train dataset
-        filename = 'KMEANS{}_clusters{}_train.np'.format(self.N, self.clusters)
+        filename = 'KMEANS{}_clusters{}_dim{}_train.np'.format(self.N, self.clusters, self.dim)
         path = os.path.join(self.path_dataset, filename)
         if os.path.exists(path):
             print('Reading training dataset at {}'.format(path))
@@ -108,7 +109,7 @@ class Generator():
             print('Saving training datatset at {}'.format(path))
             np.save(open(path, 'wb'), self.data_train)
         # load test dataset
-        filename = 'KMEANS{}_clusters{}_test.np'.format(self.N, self.clusters)
+        filename = 'KMEANS{}_clusters{}_dim{}_test.np'.format(self.N, self.clusters, self.dim)
         path = os.path.join(self.path_dataset, filename)
         if os.path.exists(path):
             print('Reading testing dataset at {}'.format(path))
@@ -121,7 +122,7 @@ class Generator():
 
 
     def sample_batch(self, num_samples, is_training=True, it=0, cuda=True, volatile=False):
-        points = torch.zeros(num_samples, self.N, 2)
+        points = torch.zeros(num_samples, self.N, self.dim)
         target = torch.zeros(num_samples, self.N)
         
         if is_training:
@@ -147,7 +148,7 @@ class Generator():
 
 if __name__ == '__main__':
     # Test Generator module
-    gen = Generator('/data/folque/dataset/', 20000, 1000, 50, 5)
+    gen = Generator('/data/folque/dataset/', 20000, 1000, 50, 5, 2)
     gen.load_dataset()
     print(gen.sample_batch(1))
     

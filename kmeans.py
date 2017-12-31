@@ -8,10 +8,12 @@ import torch.nn.functional as F
 import numpy as np
 import os
 import sys
+import pdb
 import time
 import math
 import argparse
 import time
+from sklearn.cluster import KMeans
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
@@ -30,6 +32,8 @@ parser.add_argument('--load_file', nargs='?', const=1, type=str, default='')
 parser.add_argument('--output_file', nargs='?', const=1, type=str, default='')
 args = parser.parse_args()
 
+# args.save_file = '/home/anowak/DCN-for-KMEANS/model/exp1'
+# args.load_file = '/home/anowak/DCN-for-KMEANS/model/exp1'
 
 if torch.cuda.is_available():
     dtype = torch.cuda.FloatTensor
@@ -84,7 +88,7 @@ def plot_train_logs(cost_train):
     plt.figure(1, figsize=(8,6))
     plt.clf()
     iters = range(len(cost_train))
-    plt.plot(iters, cost_train, 'b')
+    plt.semilogy(iters, cost_train, 'b')
     plt.xlabel('iterations')
     plt.ylabel('Average Mean cost')
     plt.title('Average Mean cost Training')
@@ -93,7 +97,7 @@ def plot_train_logs(cost_train):
     plt.savefig(path)
 
 
-def plot_clusters(num, e, centers, points, fig):
+def plot_clusters(num, e, centers, points, fig, model):
     plt.figure(0)
     plt.clf()
     plt.gca().set_xlim([-0.05,1.05])
@@ -106,10 +110,11 @@ def plot_clusters(num, e, centers, points, fig):
         x = torch.masked_select(points[fig,:,0], mask)
         y = torch.masked_select(points[fig,:,1], mask)
         plt.plot(x.cpu().numpy(), y.cpu().numpy(), 'o', c=rgb2hex(c))
-        center = centers[i]
-        plt.plot([center.data[0]], [center.data[1]], '*', c=rgb2hex(c))
+        if centers is not None:
+            center = centers[i]
+            plt.plot([center.data[0]], [center.data[1]], '*', c=rgb2hex(c))
     plt.title('clustering')
-    plt.savefig('./plots/clustering_it_{}.png'.format(num))
+    plt.savefig('./plots/clustering_it_{}_{}.png'.format(num, model))
     
     
 
@@ -118,7 +123,7 @@ def create_input(points, sigma2):
     OP = torch.zeros(bs,N,N,4).type(dtype)
     E = torch.eye(N).type(dtype).unsqueeze(0).expand(bs,N,N)
     OP[:,:,:,0] = E
-    W = points.unsqueeze(1).expand(bs,N,N,2) - points.unsqueeze(2).expand(bs,N,N,2)
+    W = points.unsqueeze(1).expand(bs,N,N,dim) - points.unsqueeze(2).expand(bs,N,N,dim)
     dists2 = (W * W).sum(3)
     dists = torch.sqrt(dists2)
     W = torch.exp(-dists2 / sigma2)
@@ -130,6 +135,16 @@ def create_input(points, sigma2):
     OP = Variable(OP)
     x = Variable(points)
     Y = Variable(W.clone())
+
+    # Normalize inputs
+    if normalize:
+        mu = x.sum(1)/N
+        mu_ext = mu.unsqueeze(1).expand_as(x)
+        var = ((x - mu_ext)*(x - mu_ext)).sum(1)/N
+        var_ext = var.unsqueeze(1).expand_as(x)
+        x = x - mu_ext
+        x = x/(10 * var_ext)
+
     return (OP, x, Y), dists
 
 def sample_one(probs, mode='test'):
@@ -144,7 +159,7 @@ def sample_one(probs, mode='test'):
     log_probs_samples = (sample*torch.log(probs) + (1-sample)*torch.log(1-probs)).sum(1)
     return bin_sample.data, log_probs_samples
 
-def update_input(input, dists, sample, sigma2):
+def update_input(input, dists, sample, sigma2, e, k):
     OP, x, Y = input
     bs = x.size(0)
     N = x.size(1)
@@ -165,6 +180,27 @@ def update_input(input, dists, sample, sigma2):
     U = U / U.sum(2,True).expand_as(U)
     OP[:,:,:,3] = Variable(U)
     Y = Variable(OP[:,:,:,1].data.clone())
+
+    # Normalize inputs
+    if normalize:
+        z = Variable(torch.zeros((bs, N, 2**k))).type(dtype)
+        e = e.unsqueeze(2)
+        o = Variable(torch.ones((bs, N, 1))).type(dtype)
+        z = z.scatter_(2, e, o)
+        z = z.unsqueeze(2).expand(bs, N, 2, 2**k)
+        z_bar = z * x.unsqueeze(3).expand_as(z)
+        Nk = z.sum(1)
+        mu = z_bar.sum(1)/Nk
+        mu_ext = mu.unsqueeze(1).expand_as(z)*z
+        var = ((z_bar - mu_ext)*(z_bar - mu_ext)).sum(1)/Nk
+        var_ext = var.unsqueeze(1).expand_as(z)*z
+        x = x - mu_ext.sum(3)
+        x = x/(10 * var_ext.sum(3))
+        # plt.figure(1)
+        # plt.clf()
+        # plt.plot(x[0,:,0].data.cpu().numpy(), x[0,:,1].data.cpu().numpy(), 'o')
+        # plt.savefig('./plots/norm.png')
+        # pdb.set_trace()
     return OP, x, Y
 
 def compute_variance(e, probs):
@@ -216,7 +252,9 @@ def execute(points, K, n_samples, sigma2, reg_factor, mode='test'):
                 Ei = e*2 + Samplei.long()
                 Reward2[i], _,_ = compute_reward(Ei, k+1, points)
             baseline = Reward2.mean(0,True).expand_as(Reward3)
-            loss = ((Reward2-baseline) * Lgp).sum(1).sum(0) / n_samples / bs
+            loss = 0.0
+            if (last and k == K-1) or not last:
+                loss = ((Reward2-baseline) * Lgp).sum(1).sum(0) / n_samples / bs
             loss_total = loss_total + loss - reg_factor*variance
             show_loss = Reward2.data.mean()
         sample, lgp = sample_one(probs, 'test')
@@ -225,9 +263,9 @@ def execute(points, K, n_samples, sigma2, reg_factor, mode='test'):
         if mode == 'test':
             show_loss = reward.data.mean()
         if k < K-1:
-            input = update_input(input, dists, sample, sigma2)
+            input = update_input(input, dists, sample, sigma2, e, k+1)
     if mode == 'test':
-        return e, show_loss, c
+        return e, None, show_loss, c
     else:
         return e, loss_total, show_loss, c
 
@@ -244,30 +282,97 @@ def load_model(path, model):
     else:
         raise ValueError('Parameter path {} does not exist.'.format(path))
 
+
+def Lloyds(input, n_clusters=8):
+    kmeans = KMeans(n_clusters=n_clusters)
+    nb_pbs, nb_samples, d = input.shape
+    Costs = []
+    for i in range(nb_pbs):
+        inp = input[i]
+        labels = kmeans.fit_predict(inp)
+        cost = 0
+        for cl in range(n_clusters):
+            ind = np.where(labels==cl)[0]
+            if ind.shape[0] > 0:
+                x = inp[ind]
+                mean = x.mean(axis=0)
+                cost += np.mean(np.sum((x - mean)**2, axis=1), axis=0)*ind.shape[0]
+                # cost += np.var(inp[ind], axis=0)*ind.shape[0]
+    Costs.append(cost/nb_samples)
+    Cost = sum(Costs)/len(Costs)
+    return Cost
+
+def Lloyds2(input, ind, E, k, K=2):
+    # split at first place
+    inp = input[ind]
+    if inp.shape[0] >= 2:
+        kmeans = KMeans(n_clusters=2, max_iter=20)
+        labels = kmeans.fit_predict(inp)
+    else:
+        labels = np.zeros(ind.shape[0])
+    E[ind] = 2*E[ind] + labels
+    # recursion
+    if k == K-1:
+        return E
+    else:
+        ind1 = ind[np.where(labels == 0)[0]]
+        ind2 = ind[np.where(labels == 1)[0]]
+        E = Lloyds2(input, ind1, E, k+1, K=K)
+        E = Lloyds2(input, ind2, E, k+1, K=K)
+        return E
+
+def recursive_Lloyds(input, K=2):
+    n_clusters = 2**K
+    nb_pbs, nb_samples, d = input.shape
+    Costs = []
+    Labels = []
+    for i in range(nb_pbs):
+        inp = input[i]
+        ind = np.arange(nb_samples)
+        labels = np.zeros(nb_samples)
+        labels = Lloyds2(inp, ind, labels, 0, K=K)
+        Labels.append(labels)
+        # pdb.set_trace()
+        cost = 0
+        for cl in range(n_clusters):
+            ind = np.where(labels==cl)[0]
+            if ind.shape[0] > 0:
+                x = inp[ind]
+                mean = x.mean(axis=0)
+                cost += np.mean(np.sum((x - mean)**2, axis=1), axis=0)*ind.shape[0]
+                # cost += np.var(inp[ind], axis=0)*ind.shape[0]
+        Costs.append(cost/nb_samples)
+    Cost = sum(Costs)/len(Costs)
+    Labels = np.reshape(Labels, [nb_pbs, nb_samples])
+    return Cost, Labels
+
 if __name__ == '__main__':
-    
+    dim = 4
     num_examples_train = 20000
     num_examples_test = 1000
-    N = 80
-    clusters = 8
+    N = 40
+    clusters = 4
     clip_grad_norm = 40.0
-    batch_size = 256
+    batch_size = 128
     num_features = 32
     num_layers = 20
     sigma2 = 1
     reg_factor = 0.00
-    K = 3
+    K = 2
     k_step = 0000
     n_samples = 10
+    normalize = False
+    last = True
     
-    gen = Generator('/data/folque/dataset/', num_examples_train, num_examples_test, N, clusters)
+    gen = Generator('/data/anowak/dataset/', num_examples_train, num_examples_test, N, clusters, dim)
     gen.load_dataset()
     num_iterations = 100000
     
-    gnn = Split_GNN(num_features, num_layers, 5, dim_input=2)
+    gnn = Split_GNN(num_features, num_layers, 5, dim_input=dim)
     if args.load_file != '':
         gnn = load_model(args.load_file, gnn)
     optimizer = optim.RMSprop(gnn.parameters(), lr=1e-3)
+    # optimizer = optim.Adam(gnn.parameters())
     
     test = args.test
     if test:
@@ -277,14 +382,18 @@ if __name__ == '__main__':
     log = Logger()
     start = time.time()
     for it in range(num_iterations):
-        batch = gen.sample_batch(batch_size, is_training=not test)
+        if it % 50 == 0:
+            test = True
+        batch = gen.sample_batch(batch_size, is_training=True)
         points, target = batch
         if k_step > 0:
             k = min(K,1+it//k_step)
         else:
             k = K
-        
-        e, loss, show_loss, c = execute(points, k, n_samples, sigma2, reg_factor, mode='train')
+        if not test:
+            e, loss, show_loss, c = execute(points, k, n_samples, sigma2, reg_factor, mode='train')
+        else:
+            e, loss, show_loss, c = execute(points, k, n_samples, sigma2, reg_factor, mode='test')
         log.add('show_loss', show_loss)
         
         if not test:
@@ -293,20 +402,31 @@ if __name__ == '__main__':
             nn.utils.clip_grad_norm(gnn.parameters(), clip_grad_norm)
             optimizer.step()
             
-        if not test:
-            if it%50 == 0:
-                elapsed = time.time()-start
-                print('iteration {}, var {}, loss {}, elapsed {}'.format(it, show_loss, loss.data.mean(), elapsed))
-                plot_clusters(it, e, c, points.data, 0)
-                #out1 = ['---', it, loss, w, wt, tw, elapsed]
-                #print(template_train1.format(*info_train))
-                #print(template_train2.format(*out1))
-                
-                start = time.time()
-            if it%300 == 0 and it > 0:
-                plot_train_logs(log.get('show_loss'))
-                if args.save_file != '':
-                    save_model(args.save_file, gnn)
+        # if not test:
+        if it%50 == 0:
+            elapsed = time.time()-start
+            # print('iteration {}, var {}, loss {}, elapsed {}'.format(it, show_loss, loss.data.mean(), elapsed))
+            plot_clusters(it, e, c, points.data, 0, 'gnn')
+            #out1 = ['---', it, loss, w, wt, tw, elapsed]
+            #print(template_train1.format(*info_train))
+            #print(template_train2.format(*out1))
+            start = time.time()
+            # Lloyds
+            points_np = points.data.cpu().numpy()
+            cost_lloyd = Lloyds(points_np, n_clusters=clusters)
+            cost_rec_lloyd, labels = recursive_Lloyds(points_np, K=K)
+            labels = torch.from_numpy(labels).type(dtype_l)
+            plot_clusters(it, labels, None, points.data, 0, 'lloyds')
+            print('gnn: {:.5f}, lloyds: {:.5f}, rec_lloyds: {:.5f}, ratio_lloyd: {:.5f}'
+                  'ratio_rec_lloyd: {:.5f}'
+                  .format(show_loss, cost_lloyd, cost_rec_lloyd,
+                          show_loss/cost_lloyd, show_loss/cost_rec_lloyd))
+            test = False
+
+        if it%300 == 0 and it > 0:
+            plot_train_logs(log.get('show_loss'))
+            if args.save_file != '':
+                save_model(args.save_file, gnn)
         
     if test:
         a = 1
